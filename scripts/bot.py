@@ -391,7 +391,7 @@ async def approve_suggestion_by_id(query, sugg_id):
     if cursor.fetchone():
         cursor.execute('DELETE FROM pending_suggestions WHERE id = ?', (sugg_id,))
         conn.commit()
-        os.remove(file_path)
+        # Don't delete file - it might be referenced elsewhere
         try:
             await query.edit_message_caption(caption="⚠️ Дубликат")
         except:
@@ -435,16 +435,23 @@ async def reject_suggestion_by_id(query, sugg_id):
 
 
 async def approve_all_suggestions(query):
-    """Approve all."""
+    """Approve all with deduplication by file_path."""
     conn = sqlite3.connect(DB_PATH)
     cursor = conn.cursor()
-    cursor.execute('SELECT id, file_path FROM pending_suggestions')
+    cursor.execute('SELECT id, file_path FROM pending_suggestions ORDER BY id')
     suggestions = cursor.fetchall()
     
     approved = 0
     skipped = 0
+    processed_paths = set()  # Track processed file paths to avoid duplicates
     
     for sugg_id, file_path in suggestions:
+        # Skip if we already processed this file path (collision)
+        if file_path in processed_paths:
+            cursor.execute('DELETE FROM pending_suggestions WHERE id = ?', (sugg_id,))
+            skipped += 1
+            continue
+        
         if not os.path.exists(file_path):
             cursor.execute('DELETE FROM pending_suggestions WHERE id = ?', (sugg_id,))
             skipped += 1
@@ -454,8 +461,9 @@ async def approve_all_suggestions(query):
         cursor.execute('SELECT id FROM queue WHERE file_hash = ?', (file_hash,))
         if cursor.fetchone():
             cursor.execute('DELETE FROM pending_suggestions WHERE id = ?', (sugg_id,))
-            os.remove(file_path)
+            # Don't delete file - it might be referenced by queue entry
             skipped += 1
+            processed_paths.add(file_path)
             continue
         
         cursor.execute('''
@@ -463,6 +471,7 @@ async def approve_all_suggestions(query):
             VALUES (?, ?, 'suggestion', 'approved')
         ''', (file_path, file_hash))
         cursor.execute('DELETE FROM pending_suggestions WHERE id = ?', (sugg_id,))
+        processed_paths.add(file_path)
         approved += 1
     
     conn.commit()
@@ -600,11 +609,14 @@ async def do_stats(query):
 # ==================== POSTING LOGIC ====================
 
 async def get_next_photos(count: int) -> list:
-    """Get next photos."""
+    """Get next photos with auto-cleanup of missing files."""
     conn = sqlite3.connect(DB_PATH)
     cursor = conn.cursor()
     
     order = Settings.get('post_order', 'priority')
+    
+    # Fetch more than needed to account for missing files
+    fetch_limit = count * 3
     
     if order == 'random':
         cursor.execute('''
@@ -612,7 +624,7 @@ async def get_next_photos(count: int) -> list:
             WHERE posted = 0 AND status IN ('pending', 'approved')
             ORDER BY RANDOM()
             LIMIT ?
-        ''', (count,))
+        ''', (fetch_limit,))
     else:
         cursor.execute('''
             SELECT id, file_path, source FROM queue
@@ -625,11 +637,32 @@ async def get_next_photos(count: int) -> list:
                 END,
                 created_at ASC
             LIMIT ?
-        ''', (count,))
+        ''', (fetch_limit,))
     
-    photos = cursor.fetchall()
+    all_photos = cursor.fetchall()
+    
+    # Filter and cleanup non-existent files
+    valid_photos = []
+    invalid_ids = []
+    
+    for photo_id, file_path, source in all_photos:
+        if os.path.exists(file_path):
+            valid_photos.append((photo_id, file_path, source))
+            if len(valid_photos) >= count:
+                break
+        else:
+            invalid_ids.append(photo_id)
+            print(f"⚠️ Cleaning up missing file from queue: {file_path}")
+    
+    # Remove invalid entries from queue
+    if invalid_ids:
+        placeholders = ','.join(['?'] * len(invalid_ids))
+        cursor.execute(f'DELETE FROM queue WHERE id IN ({placeholders})', invalid_ids)
+        conn.commit()
+        print(f"🧹 Removed {len(invalid_ids)} invalid entries from queue")
+    
     conn.close()
-    return photos
+    return valid_photos
 
 
 async def do_post(bot, photos) -> bool:
@@ -732,7 +765,7 @@ async def handle_photo(update: Update, context: ContextTypes.DEFAULT_TYPE):
     photo = update.message.photo[-1]
     
     file = await context.bot.get_file(photo.file_id)
-    filename = f"suggestion_{user_id}_{int(datetime.now().timestamp())}.jpg"
+    filename = f"suggestion_{user_id}_{int(datetime.now().timestamp() * 1000000)}_{update.message.message_id}.jpg"
     save_path = os.path.join(QUEUE_PATH, filename)
     
     os.makedirs(QUEUE_PATH, exist_ok=True)
