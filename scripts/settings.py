@@ -170,8 +170,16 @@ class Settings:
             return f"📅 Фиксированное время: {times} (UTC+{tz_offset})"
         else:
             interval = cls.get_int('interval_hours', 4)
-            posts_per_day = cls.get_int('posts_per_day', 3)
-            return f"⏱ Интервал: каждые {interval}ч, до {posts_per_day} постов/день"
+            # Calculate posts_per_day from interval and quiet hours
+            quiet_start = cls.get_int('quiet_hours_start', 23)
+            quiet_end = cls.get_int('quiet_hours_end', 6)
+            if quiet_start <= quiet_end:
+                quiet_duration = quiet_end - quiet_start
+            else:
+                quiet_duration = (24 - quiet_start) + quiet_end
+            active_hours = 24 - quiet_duration
+            posts_per_day = active_hours // interval
+            return f"⏱ Интервал: каждые {interval}ч, ~{posts_per_day} постов/день"
     
     @classmethod
     def get_quiet_hours_info(cls) -> str:

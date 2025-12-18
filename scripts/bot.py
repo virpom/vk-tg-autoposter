@@ -592,7 +592,16 @@ async def do_stats(query):
     if mode == 'fixed':
         posts_per_day = len(Settings.get_fixed_times())
     else:
-        posts_per_day = Settings.get_int('posts_per_day', 3)
+        interval = Settings.get_int('interval_hours', 4)
+        # Account for quiet hours
+        quiet_start = Settings.get_int('quiet_hours_start', 23)
+        quiet_end = Settings.get_int('quiet_hours_end', 6)
+        if quiet_start <= quiet_end:
+            quiet_duration = quiet_end - quiet_start
+        else:
+            quiet_duration = (24 - quiet_start) + quiet_end
+        active_hours = 24 - quiet_duration
+        posts_per_day = active_hours // interval
     
     photos_per_day = photos_per_post * posts_per_day
     if photos_per_day > 0 and queue_total > 0:
