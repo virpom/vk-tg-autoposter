@@ -1,0 +1,29 @@
+services:
+  bot:
+    build: .
+    container_name: vk-tg-bot
+    restart: unless-stopped
+    env_file:
+      - .env
+    volumes:
+      - ./photos:/app/photos
+      - ./data:/app/data
+    networks:
+      - autoposter
+
+  vk_fetcher:
+    build: .
+    container_name: vk-fetcher
+    restart: unless-stopped
+    env_file:
+      - .env
+    volumes:
+      - ./photos:/app/photos
+      - ./data:/app/data
+    command: sh -c "while true; do python scripts/vk_fetcher.py; sleep 1800; done"
+    networks:
+      - autoposter
+
+networks:
+  autoposter:
+    driver: bridge
